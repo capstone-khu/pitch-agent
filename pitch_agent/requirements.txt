@@ -1,0 +1,14 @@
+# 오디오 분석
+librosa>=0.10.0
+soundfile>=0.12.0
+noisereduce>=3.0.0
+swift-f0>=0.1.0
+
+# 피치 디텍션
+numpy>=1.24.0
+
+# 실시간 마이크 입력
+pyaudio>=0.2.13
+
+# 시각화 (선택)
+matplotlib>=3.7.0
