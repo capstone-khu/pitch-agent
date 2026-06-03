@@ -3,10 +3,14 @@ from ..agent.q_table import QTable
 from ..reward.reward_calculator import RewardCalculator
 from ..state.pitch_state import PitchState
 from ..action.pitch_action import PitchAction, FEEDBACK_MESSAGE
-from ..config import FAIL_THRESHOLD
 
 
 class PitchAgent:
+    """
+    음정 에이전트
+    - State = PitchState (fail_count 제거)
+    - CALL_SUPERVISOR: Q값 기반으로 자연스럽게 선택
+    """
 
     def __init__(self, user_id: str, session_count: int = 0):
         self.user_id           = user_id
@@ -16,13 +20,10 @@ class PitchAgent:
 
         self._current_state  = None
         self._current_action = None
-        self._fail_count     = 0
 
     def run(self, cents_deviation: float) -> dict:
-        state  = self.analyzer.analyze(cents_deviation)
-        self._update_fail_count(state)
-
-        action   = self.q_table.best_action(state, self._fail_count)
+        state    = self.analyzer.analyze(cents_deviation)
+        action   = self.q_table.best_action(state)
         feedback = FEEDBACK_MESSAGE.get(action) if action else None
 
         self._current_state  = state
@@ -34,17 +35,17 @@ class PitchAgent:
         if self._current_state is None or self._current_action is None:
             return 0.0
 
-        next_state      = self.analyzer.analyze(next_cents_deviation)
-        next_fail_count = 0 if next_state == PitchState.GOOD else self._fail_count + 1
+        next_state           = self.analyzer.analyze(next_cents_deviation)
+        action_was_supervisor = (self._current_action == PitchAction.CALL_SUPERVISOR)
 
         reward = self.reward_calculator.calculate(
-            self._current_state, next_state, self._fail_count
+            self._current_state, next_state, action_was_supervisor
         )
         self.q_table.update(
-            self._current_state, self._fail_count,
+            self._current_state,
             self._current_action,
             reward,
-            next_state, next_fail_count
+            next_state
         )
         return reward
 
@@ -55,30 +56,16 @@ class PitchAgent:
         self.analyzer.reset()
         self._current_state  = None
         self._current_action = None
-        self._fail_count     = 0
-
-    @property
-    def fail_count(self) -> int:
-        return self._fail_count
 
     @property
     def current_state(self) -> PitchState:
         return self._current_state
 
-    def _update_fail_count(self, state: PitchState):
-        if state == PitchState.GOOD:
-            self._fail_count = 0
-        elif self._current_state is None:
-            self._fail_count = 0
-        else:
-            self._fail_count += 1
-
-    def _build_result(self, state, action, feedback) -> dict:
+    def _build_result(self, state: PitchState, action, feedback) -> dict:
         return {
-            "agent":       "pitch",
-            "state":       state.value,
-            "fail_count":  self._fail_count,
-            "action":      action.value if action else None,
-            "feedback":    feedback,
-            "tripled_out": self._fail_count >= FAIL_THRESHOLD,
+            "agent":            "pitch",
+            "state":            state.value,
+            "action":           action.value if action else None,
+            "feedback":         feedback,
+            "call_supervisor":  action == PitchAction.CALL_SUPERVISOR,
         }

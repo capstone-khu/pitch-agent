@@ -43,6 +43,10 @@ class RealtimeBridge:
         self._current_measure     = None
         self._measure_cents       = []   # 유효 cents 누적
 
+        # 음표 단위 수집 버퍼 (슈퍼바이저 전송용)
+        self._note_frames         = {}   # {note: {"target_hz": float, "actual_hz": [], "cents": []}}
+        self._current_note        = None
+
         # 마디 단위 Q업데이트용
         self._prev_measure_state  = None  # 이전 마디 대표 State
         self._prev_measure_action = None  # 이전 마디 선택된 Action
@@ -172,9 +176,23 @@ class RealtimeBridge:
                     self._flush_measure_feedback()
                 self._current_measure = measure
                 self._measure_cents   = []
+                self._note_frames     = {}
+                self._current_note    = None
 
             # cents 누적 (전부 사용 - 옥타브 정규화 이후 값)
             self._measure_cents.append(cents)
+
+            # 음표 단위 프레임 수집 (index 기준으로 구분)
+            note_idx = target_note['index']
+            if note_idx not in self._note_frames:
+                self._note_frames[note_idx] = {
+                    "note":       target_note['note'],
+                    "target_hz":  target_note['hz_exact'],
+                    "actual_hz":  [],
+                    "cents":      []
+                }
+            self._note_frames[note_idx]["actual_hz"].append(normalized_hz)
+            self._note_frames[note_idx]["cents"].append(cents)
 
         return None  # 피드백은 마디 단위로만 출력
 
@@ -252,25 +270,50 @@ class RealtimeBridge:
         )
         self._session_measure_results[self._current_measure] = measure_success
 
-        # 슈퍼바이저 호출 페이로드 생성
-        if action == PitchAction.CALL_SUPERVISOR:
-            reward_for_supervisor = reward if (
-                self._prev_measure_state is not None and
-                self._prev_measure_action is not None
-            ) else 0.0
-            q_value = self.pitch_agent.q_table.get(curr_state, action)
-            supervisor_payload = {
-                "agent":    "pitch",
-                "measure":  self._current_measure,
-                "state":    curr_state.value,
-                "action_id":"SA-04",
-                "action":   "CALL_SUPERVISOR",
-                "feedback": feedback,
-                "reward":   round(reward_for_supervisor, 3),
-                "q":        round(q_value, 3),
-                "meta":     {}
-            }
-            self._call_supervisor(supervisor_payload)
+        # 음표 단위 평균 계산 (index 순서 유지)
+        notes_summary = []
+        for note_idx in sorted(self._note_frames.keys()):
+            frames = self._note_frames[note_idx]
+            if frames["actual_hz"]:
+                notes_summary.append({
+                    "note":          frames["note"],
+                    "target_hz":     frames["target_hz"],
+                    "avg_actual_hz": round(float(np.mean(frames["actual_hz"])), 2),
+                    "avg_cents":     round(float(np.mean(frames["cents"])), 1),
+                    "frame_count":   len(frames["actual_hz"])
+                })
+
+        # 마디 단위 페이로드 (상시 전송)
+        measure_ranges = {
+            1: (0.95, 3.85), 2: (3.85, 6.05), 3: (6.05, 8.95),
+            4: (8.95, 11.25), 5: (11.25, 13.95), 6: (13.95, 16.60),
+            7: (16.60, 19.10), 8: (19.10, 21.55), 9: (21.55, 24.10),
+            10: (24.10, 26.20), 11: (26.20, 29.10), 12: (29.10, 33.00)
+        }
+        ts = measure_ranges.get(self._current_measure, (0.0, 0.0))
+
+        q_value = self.pitch_agent.q_table.get(curr_state, action)
+        action_id_map = {
+            "PITCH_UP": "SA-01", "PITCH_DOWN": "SA-02",
+            "POSITIVE_PITCH": "SA-03", "CALL_SUPERVISOR": "SA-04"
+        }
+
+        measure_payload = {
+            "agent":            "pitch",
+            "measure":          self._current_measure,
+            "timestamp":        {"start": ts[0], "end": ts[1]},
+            "state":            curr_state.value,
+            "action_id":        action_id_map.get(action.value, ""),
+            "action":           action.value,
+            "feedback":         feedback,
+            "reward":           round(reward, 3),
+            "q":                round(q_value, 3),
+            "call_supervisor":  action == PitchAction.CALL_SUPERVISOR,
+            "notes":            notes_summary
+        }
+
+        # 슈퍼바이저에게 상시 전달
+        self._send_to_supervisor(measure_payload)
 
         # 출력
         print(f"\n{'='*60}")
@@ -280,13 +323,16 @@ class RealtimeBridge:
         print(f"  → 피드백: {feedback}")
         print(f"{'='*60}\n")
 
-    def _call_supervisor(self, payload: dict):
+    def _send_to_supervisor(self, payload: dict):
         """
-        슈퍼바이저 에이전트 호출 (현재는 로그 출력으로 대체)
+        슈퍼바이저 에이전트로 마디 데이터 전송 (상시)
         실제 연동 시 이 메서드에서 슈퍼바이저 API 호출
         """
         import json
-        print(f"  → [SUPERVISOR CALL] 페이로드 전달:")
+        if payload["call_supervisor"]:
+            print(f"  → [SUPERVISOR CALL] 페이로드 전달:")
+        else:
+            print(f"  → [SUPERVISOR DATA] 마디 데이터 전달:")
         print(f"    {json.dumps(payload, ensure_ascii=False, indent=4)}")
 
     def _end_session(self):
